@@ -27,6 +27,31 @@ public actor AmazonCreatorsClient {
     private let scheduler: RequestScheduler
     private let cache: ResponseCache
 
+    /// Cria um cliente que gera e renova seus access tokens OAuth2 a partir das credenciais informadas.
+    ///
+    /// Crie ``AmazonCreatorsCredentials`` na seção Applications da [console da Amazon Creators API](https://affiliate-program.amazon.com/creatorsapi), usando Create App e Add New Credential.
+    public init(
+        _ credentials: AmazonCreatorsCredentials,
+        partnerTag: String,
+        marketplace: Marketplace,
+        configuration: AmazonCreatorsConfiguration = AmazonCreatorsConfiguration()
+    ) {
+        let tokenProvider = AmazonCreatorsOAuth2TokenProvider(credentials)
+
+        self.init(
+            accessTokenProvider: {
+                try await tokenProvider.accessToken()
+            },
+            accessTokenRefreshProvider: {
+                try await tokenProvider.refreshAccessToken()
+            },
+            credentialVersion: credentials.credentialVersion,
+            partnerTag: partnerTag,
+            marketplace: marketplace,
+            configuration: configuration
+        )
+    }
+
     /// Cria um cliente com um access token obtido externamente.
     public init(
         accessToken: String,
@@ -92,6 +117,31 @@ public actor AmazonCreatorsClient {
         self.transport = transport
         scheduler = RequestScheduler(requestsPerSecond: configuration.requestsPerSecond)
         cache = ResponseCache(maximumEntries: configuration.maxCachedResponses)
+    }
+
+    init(
+        _ credentials: AmazonCreatorsCredentials,
+        partnerTag: String,
+        marketplace: Marketplace,
+        configuration: AmazonCreatorsConfiguration,
+        transport: any HTTPTransport,
+        tokenTransport: any HTTPTransport
+    ) {
+        let tokenProvider = AmazonCreatorsOAuth2TokenProvider(credentials, transport: tokenTransport)
+
+        self.init(
+            accessTokenProvider: {
+                try await tokenProvider.accessToken()
+            },
+            accessTokenRefreshProvider: {
+                try await tokenProvider.refreshAccessToken()
+            },
+            credentialVersion: credentials.credentialVersion,
+            partnerTag: partnerTag,
+            marketplace: marketplace,
+            configuration: configuration,
+            transport: transport
+        )
     }
 
     init(

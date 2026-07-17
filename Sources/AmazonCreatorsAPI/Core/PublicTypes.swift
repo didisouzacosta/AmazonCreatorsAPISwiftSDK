@@ -1,6 +1,8 @@
 import Foundation
 
 /// A versão da credencial usada para obter o access token da Creators API.
+///
+/// Use exatamente a Version emitida com a credencial em [Amazon Creators API](https://affiliate-program.amazon.com/creatorsapi); não a deduza pelo marketplace.
 public enum CredentialVersion: String, CaseIterable, Codable, Sendable {
     /// Credencial v2 para a região da América do Norte.
     case v2NorthAmerica = "2.1"
@@ -22,6 +24,36 @@ public enum CredentialVersion: String, CaseIterable, Codable, Sendable {
         case .v3NorthAmerica, .v3Europe, .v3FarEast:
             return nil
         }
+    }
+}
+
+/// Credenciais OAuth2 da Creators API.
+///
+/// Crie-as na seção Applications da [console da Amazon Creators API](https://affiliate-program.amazon.com/creatorsapi): escolha Create App e, dentro do aplicativo, Add New Credential.
+///
+/// O SDK mantém esse secret somente em memória. Como qualquer Secret incluído em aplicativo distribuído pode ser extraído, proteja a distribuição e a rotação das credenciais conforme o risco da integração.
+public struct AmazonCreatorsCredentials: Sendable {
+
+    // MARK: - Public Properties
+
+    /// O Credential ID gerado pela Amazon na criação da credencial.
+    public let credentialID: String
+    /// O Credential Secret gerado pela Amazon na criação da credencial.
+    public let credentialSecret: String
+    /// A Version associada ao par de credenciais, conforme emitida pela Amazon.
+    public let credentialVersion: CredentialVersion
+
+    // MARK: - Initializer
+
+    /// Cria as credenciais usadas pelo provider OAuth2.
+    public init(
+        _ credentialID: String,
+        credentialSecret: String,
+        credentialVersion: CredentialVersion
+    ) {
+        self.credentialID = credentialID
+        self.credentialSecret = credentialSecret
+        self.credentialVersion = credentialVersion
     }
 }
 
@@ -90,6 +122,47 @@ public typealias AccessTokenProvider = @Sendable () async throws -> String
 
 /// Uma fonte assíncrona de um novo access token após uma falha de autenticação.
 public typealias AccessTokenRefreshProvider = @Sendable () async throws -> String
+
+extension CredentialVersion {
+
+    var isLoginWithAmazon: Bool {
+        switch self {
+        case .v2NorthAmerica, .v2Europe, .v2FarEast:
+
+            return false
+        case .v3NorthAmerica, .v3Europe, .v3FarEast:
+
+            return true
+        }
+    }
+
+    var oauth2Scope: String {
+        isLoginWithAmazon ? "creatorsapi::default" : "creatorsapi/default"
+    }
+
+    var oauth2TokenEndpoint: URL {
+        switch self {
+        case .v2NorthAmerica:
+
+            return URL(string: "https://creatorsapi.auth.us-east-1.amazoncognito.com/oauth2/token")!
+        case .v2Europe:
+
+            return URL(string: "https://creatorsapi.auth.eu-south-2.amazoncognito.com/oauth2/token")!
+        case .v2FarEast:
+
+            return URL(string: "https://creatorsapi.auth.us-west-2.amazoncognito.com/oauth2/token")!
+        case .v3NorthAmerica:
+
+            return URL(string: "https://api.amazon.com/auth/o2/token")!
+        case .v3Europe:
+
+            return URL(string: "https://api.amazon.co.uk/auth/o2/token")!
+        case .v3FarEast:
+
+            return URL(string: "https://api.amazon.co.jp/auth/o2/token")!
+        }
+    }
+}
 
 /// As opções de cache de respostas do SDK.
 public enum CachePolicy: Sendable {

@@ -56,6 +56,116 @@ struct AmazonCreatorsAPIClientTests {
         #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer token-v3, Version 2.1")
     }
 
+    @Test("O provider OAuth2 v3 gera, reutiliza e renova o access token")
+    func v3OAuth2TokenProviderGeneratesCachesAndRefreshesAccessToken() async throws {
+        let transport = MockTransport(responses: [
+            .json("{\"access_token\": \"token-inicial\", \"expires_in\": 3600}"),
+            .json("{\"access_token\": \"token-renovado\", \"expires_in\": 3600}")
+        ])
+        let credentials = AmazonCreatorsCredentials(
+            "credential-id",
+            credentialSecret: "credential-secret",
+            credentialVersion: .v3NorthAmerica
+        )
+        let provider = AmazonCreatorsOAuth2TokenProvider(credentials, transport: transport)
+
+        let firstToken = try await provider.accessToken()
+        let cachedToken = try await provider.accessToken()
+        let refreshedToken = try await provider.refreshAccessToken()
+        let request = try #require(await transport.requests().first)
+        let body = try #require(request.httpBody)
+        let payload = try #require(JSONSerialization.jsonObject(with: body) as? [String: String])
+
+        #expect(firstToken == "token-inicial")
+        #expect(cachedToken == "token-inicial")
+        #expect(refreshedToken == "token-renovado")
+        #expect(await transport.requests().count == 2)
+        #expect(request.url?.absoluteString == "https://api.amazon.com/auth/o2/token")
+        #expect(request.value(forHTTPHeaderField: "Content-Type") == "application/json")
+        #expect(payload == [
+            "grant_type": "client_credentials",
+            "client_id": "credential-id",
+            "client_secret": "credential-secret",
+            "scope": "creatorsapi::default"
+        ])
+    }
+
+    @Test("O provider OAuth2 renova automaticamente um token próximo do vencimento")
+    func oauth2TokenProviderRefreshesTokenBeforeExpiration() async throws {
+        let transport = MockTransport(responses: [
+            .json("{\"access_token\": \"token-próximo-do-vencimento\", \"expires_in\": 30}"),
+            .json("{\"access_token\": \"token-atual\", \"expires_in\": 3600}")
+        ])
+        let credentials = AmazonCreatorsCredentials(
+            "credential-id",
+            credentialSecret: "credential-secret",
+            credentialVersion: .v3NorthAmerica
+        )
+        let provider = AmazonCreatorsOAuth2TokenProvider(credentials, transport: transport)
+
+        let firstToken = try await provider.accessToken()
+        let refreshedToken = try await provider.accessToken()
+
+        #expect(firstToken == "token-próximo-do-vencimento")
+        #expect(refreshedToken == "token-atual")
+        #expect(await transport.requests().count == 2)
+    }
+
+    @Test("O provider OAuth2 v2 usa Cognito e corpo form-encoded")
+    func v2OAuth2TokenProviderUsesCognitoFormRequest() async throws {
+        let transport = MockTransport(responses: [
+            .json("{\"access_token\": \"token-v2\", \"expires_in\": 3600}")
+        ])
+        let credentials = AmazonCreatorsCredentials(
+            "credential-id",
+            credentialSecret: "credential-secret",
+            credentialVersion: .v2Europe
+        )
+        let provider = AmazonCreatorsOAuth2TokenProvider(credentials, transport: transport)
+
+        _ = try await provider.accessToken()
+        let request = try #require(await transport.requests().first)
+        let body = String(decoding: try #require(request.httpBody), as: UTF8.self)
+
+        #expect(request.url?.absoluteString == "https://creatorsapi.auth.eu-south-2.amazoncognito.com/oauth2/token")
+        #expect(request.value(forHTTPHeaderField: "Content-Type") == "application/x-www-form-urlencoded")
+        #expect(body == "grant_type=client_credentials&client_id=credential-id&client_secret=credential-secret&scope=creatorsapi/default")
+    }
+
+    @Test("O cliente criado com credenciais gera e renova o token sem backend")
+    func clientWithCredentialsGeneratesAndRefreshesTokenWithoutBackend() async throws {
+        let catalogTransport = MockTransport(responses: [
+            .status(401, "{\"code\": \"InvalidToken\", \"message\": \"Expired\"}"),
+            .json("{\"browseNodesResult\": {\"browseNodes\": []}}")
+        ])
+        let tokenTransport = MockTransport(responses: [
+            .json("{\"access_token\": \"token-inicial\", \"expires_in\": 3600}"),
+            .json("{\"access_token\": \"token-renovado\", \"expires_in\": 3600}")
+        ])
+        let credentials = AmazonCreatorsCredentials(
+            "credential-id",
+            credentialSecret: "credential-secret",
+            credentialVersion: .v3NorthAmerica
+        )
+        let client = AmazonCreatorsClient(
+            credentials,
+            partnerTag: "store-20",
+            marketplace: .brazil,
+            configuration: .testDefault,
+            transport: catalogTransport,
+            tokenTransport: tokenTransport
+        )
+
+        _ = try await client.getBrowseNodes(GetBrowseNodesRequest(ids: ["123"]))
+
+        let authorizations = await catalogTransport.requests().compactMap {
+            $0.value(forHTTPHeaderField: "Authorization")
+        }
+
+        #expect(authorizations == ["Bearer token-inicial", "Bearer token-renovado"])
+        #expect(await tokenTransport.requests().count == 2)
+    }
+
     @Test("O access token pode ser atualizado sem recriar o cliente")
     func accessTokenCanBeUpdatedAtRuntime() async throws {
         let transport = MockTransport(responses: [

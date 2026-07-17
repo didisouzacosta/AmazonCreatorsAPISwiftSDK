@@ -8,25 +8,34 @@ O pacote concentra serialização, autenticação HTTP, limitação de taxa, ret
 
 - Busca de produtos, ASINs, variações e browse nodes com contratos Swift `Sendable`.
 - Autorização Bearer para credenciais v2 e v3, com token fornecido pelo aplicativo ou por providers assíncronos, incluindo renovação após `401`.
+- Geração OAuth2 e cache em memória de tokens, com renovação antecipada e renovação forçada após `401`.
 - Rate limiting seguro sob concorrência, retry para `429`/`5xx` e respeito a `Retry-After`.
 - Cache LRU limitado, que nunca guarda JSON inválido nem respostas parciais com `errors`.
 - Validação local de limites, busca semântica, moeda, locale e browse node IDs antes de consumir cota.
 
 ## Pré-requisitos
 
-Você precisa ser um Amazon Associate elegível, ter acesso à Creators API e usar um `partnerTag` válido para o marketplace escolhido. A Amazon gera **Credential ID**, **Secret** e **Version**, mas o aplicativo iOS não deve receber ou armazenar o Secret.
+Você precisa ser um Amazon Associate elegível, ter acesso à Creators API e usar um `partnerTag` válido para o marketplace escolhido. A documentação da Amazon lista, entre os requisitos de acesso, o cadastro no programa Associates para o marketplace de destino, o registro para acesso à API e ao menos 10 vendas qualificadas nos últimos 30 dias.
 
-Obtenha o access token em um backend seguro e forneça somente esse token temporário ao SDK. Tokens normalmente expiram em uma hora. Para credenciais v2, informe a versão regional correta; para v3, use a versão v3 correspondente à origem do token.
+### Onde obter as credenciais
+
+1. Acesse a [console da Amazon Creators API](https://affiliate-program.amazon.com/creatorsapi) e entre com a conta do Amazon Associates que será dona da integração.
+2. Na seção **Applications**, selecione **Create App** e informe o nome do aplicativo.
+3. Dentro do aplicativo criado, selecione **Add New Credential**.
+4. Copie e guarde os três valores gerados: **Credential ID**, **Credential Secret** e **Version**. Informe a `Version` recebida pela Amazon exatamente como foi emitida — não a deduza pelo marketplace.
+
+O `partnerTag` é o seu identificador de atribuição do Amazon Associates para o mesmo marketplace das chamadas. Sem ele ou sem uma credencial válida, a Amazon recusa as operações de catálogo.
+
+O SDK pode gerar o access token diretamente, sem backend: informe essas credenciais no inicializador de `AmazonCreatorsClient`. Tokens normalmente expiram em uma hora.
 
 ```mermaid
 flowchart LR
-    App["Aplicativo iOS/macOS"] -->|"access token temporário"| SDK["AmazonCreatorsAPI"]
+    App["Aplicativo iOS/macOS"] -->|"Credential ID, Secret e Version"| SDK["AmazonCreatorsAPI"]
     SDK -->|"catálogo"| Catalog["Amazon Creators API"]
-    Backend["Backend do integrador"] -->|"Credential ID, Secret e Version"| Auth["Autenticação Amazon"]
-    Backend -->|"token temporário"| App
+    SDK -->|"OAuth2 client_credentials"| Auth["Autenticação Amazon"]
 ```
 
-Mantenha o Secret exclusivamente no backend. O app deve receber apenas o token temporário; o SDK nunca armazena Credential Secret, `client_secret` ou `refresh_token`.
+O fluxo `client_credentials` não usa `refresh_token`: a renovação obtém um novo access token com as próprias credenciais. O SDK mantém o Credential Secret somente em memória e não o registra. Ainda assim, qualquer Secret incluído em um aplicativo distribuído pode ser extraído; proteja a distribuição e a rotação das credenciais conforme o risco da sua integração.
 
 ## Instalação pelo Swift Package Manager
 
@@ -46,22 +55,43 @@ import AmazonCreatorsAPI
 
 ## Inicialização
 
+### Com as credenciais da Creators API
+
+Passe os valores obtidos na console da Amazon diretamente a `AmazonCreatorsClient`. Internamente ele usa `AmazonCreatorsOAuth2TokenProvider`, equivalente ao `OAuth2TokenManager` do SDK PHP: reutiliza o token enquanto válido, o considera expirado 30 segundos antes do prazo da Amazon e gera outro token quando necessário. Após um `401`, a renovação e a repetição única da chamada são automáticas.
+
+```swift
+let credentials = AmazonCreatorsCredentials(
+    "seu-credential-id",
+    credentialSecret: "seu-credential-secret",
+    credentialVersion: .v3NorthAmerica
+)
+let client = AmazonCreatorsClient(
+    credentials,
+    partnerTag: "seu-tag-20",
+    marketplace: .brazil
+)
+```
+
+O provider escolhe automaticamente o fluxo da versão: v2 usa Cognito, `application/x-www-form-urlencoded` e o escopo `creatorsapi/default`; v3 usa Login with Amazon, JSON e o escopo `creatorsapi::default`.
+
+### Com token obtido externamente
+
+Se a sua integração já recebe um access token de outra fonte, passe-o diretamente. Clientes criados dessa forma não renovam o token automaticamente; atualize-os quando a fonte emitir outro token.
+
 ```swift
 let client = AmazonCreatorsClient(
-    accessToken: accessTokenFromYourBackend,
+    accessToken: externallyIssuedAccessToken,
     credentialVersion: .v3NorthAmerica,
     partnerTag: "seu-tag-20",
     marketplace: .brazil
 )
 ```
 
-Se o token for renovado, atualize o cliente sem recriá-lo:
-
 ```swift
 try await client.updateAccessToken(newAccessToken)
 ```
 
-Para obter e renovar tokens sob demanda, use providers assíncronos que consultem apenas uma origem controlada pelo integrador. Depois de um `401`, o SDK chama `accessTokenRefreshProvider` e repete exatamente uma vez a operação que falhou:
+Para obter e renovar tokens por uma fonte personalizada, use providers assíncronos. Depois de um `401`, o SDK chama `accessTokenRefreshProvider` e repete exatamente uma vez a operação que falhou:
 
 ```swift
 let client = AmazonCreatorsClient(
@@ -77,7 +107,7 @@ let client = AmazonCreatorsClient(
 )
 ```
 
-Se `accessTokenRefreshProvider` for omitido, o SDK chama `accessTokenProvider` novamente após o `401`. Use o provider específico quando o seu broker diferenciar uma leitura de cache de uma renovação forçada. Clientes criados com `accessToken` estático não podem ser renovados automaticamente; nesse caso, chame `updateAccessToken(_:)` depois de obter um token novo no backend.
+Se `accessTokenRefreshProvider` for omitido, o SDK chama `accessTokenProvider` novamente após o `401`. Use o provider específico quando a sua fonte diferenciar uma leitura de cache de uma renovação forçada.
 
 ## Exemplo prático: pesquisa para uma tela de catálogo
 
@@ -277,7 +307,7 @@ O SDK rejeita antes da chamada valores que desperdiçariam cota: busca sem termo
 | Erro | Ação recomendada |
 |---|---|
 | `invalidRequest` | Corrija o input local; nenhuma chamada foi enviada. |
-| `unauthorized` | Com providers, ocorre somente após a renovação e a repetição automáticas. Verifique o broker; com token estático, renove no backend e chame `updateAccessToken(_:)`. |
+| `unauthorized` | Com `AmazonCreatorsCredentials` ou providers, ocorre somente após a renovação e a repetição automáticas. Verifique as credenciais ou a fonte do token; com token estático, obtenha outro token e chame `updateAccessToken(_:)`. |
 | `accessDenied` | Verifique `partnerTag`, marketplace e permissões da credencial. |
 | `throttled` | Reduza a taxa no escopo da credencial; o SDK já respeita retries limitados. |
 | `server` ou `transport` | Mostre uma ação de tentar novamente para o usuário. |
@@ -291,8 +321,8 @@ do {
 } catch let error as AmazonCreatorsError {
     switch error {
     case .unauthorized:
-        // Com token estático, obtenha outro token no backend e atualize o cliente.
-        // Com providers, a renovação e uma repetição já foram tentadas pelo SDK.
+        // Com token estático, obtenha outro token na sua fonte e atualize o cliente.
+        // Com credenciais ou providers, a renovação e uma repetição já foram tentadas pelo SDK.
         break
     case .invalidRequest:
         // Apresente o erro de input sem repetir a chamada.
@@ -310,6 +340,8 @@ Envie sempre o `partnerTag` adequado ao marketplace e use o `affiliateURL` retor
 
 ## Documentação oficial
 
+- [Console da Creators API — criar app e credenciais](https://affiliate-program.amazon.com/creatorsapi)
+- [Pré-requisitos e registro para acesso à API](https://affiliate-program.amazon.com/creatorsapi/docs/)
 - [Using cURL](https://affiliate-program.amazon.com/creatorsapi/docs/en-us/get-started/using-curl)
 - [Headers e parâmetros](https://affiliate-program.amazon.com/creatorsapi/docs/en-us/concepts/common-request-headers-and-parameters)
 - [Limites de API](https://affiliate-program.amazon.com/creatorsapi/docs/en-us/concepts/api-rates)
