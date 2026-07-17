@@ -8,6 +8,8 @@ Um cliente Swift concorrente para operações de catálogo da Amazon Creators AP
 
 Crie um ``AmazonCreatorsClient`` com marketplace, partner tag e versão da credencial. Em seguida, use ``AmazonCreatorsClient/getItems(_:)``, ``AmazonCreatorsClient/searchItems(_:)``, ``AmazonCreatorsClient/getVariations(_:)`` ou ``AmazonCreatorsClient/getBrowseNodes(_:)``.
 
+Para renovar tokens, forneça um ``AccessTokenProvider`` e, quando o backend diferenciar uma renovação forçada da leitura em cache, um ``AccessTokenRefreshProvider``. O SDK chama o provider de renovação após um HTTP 401 e repete a operação uma única vez.
+
 ```swift
 let client = AmazonCreatorsClient(
     accessToken: accessToken,
@@ -32,6 +34,8 @@ Os links em ``Product/affiliateURL`` são emitidos pela Amazon e devem ser apres
 - ``CredentialVersion``
 - ``Marketplace``
 - ``PartnerTag``
+- ``AccessTokenProvider``
+- ``AccessTokenRefreshProvider``
 
 ### Operações de catálogo
 

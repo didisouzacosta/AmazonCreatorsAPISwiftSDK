@@ -18,6 +18,7 @@ public actor AmazonCreatorsClient {
     private var manuallyUpdatedToken: String?
     private let initialAccessToken: String?
     private let accessTokenProvider: AccessTokenProvider?
+    private let accessTokenRefreshProvider: AccessTokenRefreshProvider?
     private let credentialVersion: CredentialVersion
     private let partnerTag: PartnerTag
     private let marketplace: Marketplace
@@ -37,6 +38,7 @@ public actor AmazonCreatorsClient {
         manuallyUpdatedToken = nil
         initialAccessToken = accessToken
         accessTokenProvider = nil
+        accessTokenRefreshProvider = nil
         self.credentialVersion = credentialVersion
         self.partnerTag = PartnerTag(partnerTag)
         self.marketplace = marketplace
@@ -47,8 +49,12 @@ public actor AmazonCreatorsClient {
     }
 
     /// Cria um cliente que solicita um access token temporário ao provider antes de cada chamada de rede.
+    ///
+    /// Após uma resposta 401, o cliente solicita um token ao `accessTokenRefreshProvider` e repete a chamada uma vez.
+    /// Quando omitido, o provider principal é usado também para a renovação.
     public init(
         accessTokenProvider: @escaping AccessTokenProvider,
+        accessTokenRefreshProvider: AccessTokenRefreshProvider? = nil,
         credentialVersion: CredentialVersion,
         partnerTag: String,
         marketplace: Marketplace,
@@ -57,6 +63,7 @@ public actor AmazonCreatorsClient {
         manuallyUpdatedToken = nil
         initialAccessToken = nil
         self.accessTokenProvider = accessTokenProvider
+        self.accessTokenRefreshProvider = accessTokenRefreshProvider ?? accessTokenProvider
         self.credentialVersion = credentialVersion
         self.partnerTag = PartnerTag(partnerTag)
         self.marketplace = marketplace
@@ -77,6 +84,29 @@ public actor AmazonCreatorsClient {
         manuallyUpdatedToken = nil
         initialAccessToken = accessToken
         accessTokenProvider = nil
+        accessTokenRefreshProvider = nil
+        self.credentialVersion = credentialVersion
+        self.partnerTag = PartnerTag(partnerTag)
+        self.marketplace = marketplace
+        self.configuration = configuration
+        self.transport = transport
+        scheduler = RequestScheduler(requestsPerSecond: configuration.requestsPerSecond)
+        cache = ResponseCache(maximumEntries: configuration.maxCachedResponses)
+    }
+
+    init(
+        accessTokenProvider: @escaping AccessTokenProvider,
+        accessTokenRefreshProvider: AccessTokenRefreshProvider? = nil,
+        credentialVersion: CredentialVersion,
+        partnerTag: String,
+        marketplace: Marketplace,
+        configuration: AmazonCreatorsConfiguration,
+        transport: any HTTPTransport
+    ) {
+        manuallyUpdatedToken = nil
+        initialAccessToken = nil
+        self.accessTokenProvider = accessTokenProvider
+        self.accessTokenRefreshProvider = accessTokenRefreshProvider ?? accessTokenProvider
         self.credentialVersion = credentialVersion
         self.partnerTag = PartnerTag(partnerTag)
         self.marketplace = marketplace
@@ -171,12 +201,18 @@ public actor AmazonCreatorsClient {
         }
 
         var attempt = 0
+        var didRefreshAccessToken = false
+        var retryAccessToken: String?
 
         while true {
             try Task.checkCancellation()
 
             do {
-                let request = try await makeURLRequest(path: path, payload: payloadData)
+                let request = try await makeURLRequest(
+                    path: path,
+                    payload: payloadData,
+                    overrideAccessToken: retryAccessToken
+                )
 
                 try await scheduler.waitForPermission()
 
@@ -184,6 +220,13 @@ public actor AmazonCreatorsClient {
 
                 guard (200...299).contains(response.statusCode) else {
                     let error = serviceError(from: response)
+
+                    if case .unauthorized = error, !didRefreshAccessToken, accessTokenRefreshProvider != nil {
+                        didRefreshAccessToken = true
+                        retryAccessToken = try await refreshAccessToken()
+
+                        continue
+                    }
 
                     if shouldRetry(error), attempt < configuration.maxRetryAttempts {
                         attempt += 1
@@ -228,8 +271,19 @@ public actor AmazonCreatorsClient {
         }
     }
 
-    private func makeURLRequest(path: String, payload: Data) async throws -> URLRequest {
-        let token = try await accessToken()
+    private func makeURLRequest(
+        path: String,
+        payload: Data,
+        overrideAccessToken: String?
+    ) async throws -> URLRequest {
+        let token: String
+
+        if let overrideAccessToken {
+            token = overrideAccessToken
+        } else {
+            token = try await accessToken()
+        }
+
         let url = Self.baseURL.appending(path: path)
         var request = URLRequest(url: url)
 
@@ -260,11 +314,32 @@ public actor AmazonCreatorsClient {
             throw AmazonCreatorsError.unauthorized(APIProblem(message: "Nenhum access token foi configurado."))
         }
 
+        return try await token(
+            from: accessTokenProvider,
+            emptyTokenMessage: "O provider retornou um access token vazio."
+        )
+    }
+
+    private func refreshAccessToken() async throws -> String {
+        guard let accessTokenRefreshProvider else {
+            throw AmazonCreatorsError.unauthorized(APIProblem(message: "Nenhum provider de renovação de token foi configurado."))
+        }
+
+        return try await token(
+            from: accessTokenRefreshProvider,
+            emptyTokenMessage: "O provider de renovação retornou um access token vazio."
+        )
+    }
+
+    private func token(
+        from provider: AccessTokenProvider,
+        emptyTokenMessage: String
+    ) async throws -> String {
         do {
-            let token = try await accessTokenProvider()
+            let token = try await provider()
 
             guard !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                throw AmazonCreatorsError.unauthorized(APIProblem(message: "O provider retornou um access token vazio."))
+                throw AmazonCreatorsError.unauthorized(APIProblem(message: emptyTokenMessage))
             }
 
             return token

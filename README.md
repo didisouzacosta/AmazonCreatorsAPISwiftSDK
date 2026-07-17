@@ -7,7 +7,7 @@ O pacote concentra serialização, autenticação HTTP, limitação de taxa, ret
 ## O que o pacote resolve
 
 - Busca de produtos, ASINs, variações e browse nodes com contratos Swift `Sendable`.
-- Autorização Bearer para credenciais v2 e v3, com token fornecido pelo aplicativo ou por um provider assíncrono.
+- Autorização Bearer para credenciais v2 e v3, com token fornecido pelo aplicativo ou por providers assíncronos, incluindo renovação após `401`.
 - Rate limiting seguro sob concorrência, retry para `429`/`5xx` e respeito a `Retry-After`.
 - Cache LRU limitado, que nunca guarda JSON inválido nem respostas parciais com `errors`.
 - Validação local de limites, busca semântica, moeda, locale e browse node IDs antes de consumir cota.
@@ -26,7 +26,7 @@ flowchart LR
     Backend -->|"token temporário"| App
 ```
 
-Mantenha o Secret exclusivamente no backend. O app deve receber apenas o token temporário e tratar uma falha `unauthorized` renovando-o pelo seu backend.
+Mantenha o Secret exclusivamente no backend. O app deve receber apenas o token temporário; o SDK nunca armazena Credential Secret, `client_secret` ou `refresh_token`.
 
 ## Instalação pelo Swift Package Manager
 
@@ -61,18 +61,23 @@ Se o token for renovado, atualize o cliente sem recriá-lo:
 try await client.updateAccessToken(newAccessToken)
 ```
 
-Para obter o token sob demanda, use um provider assíncrono. O provider deve buscar tokens apenas em uma origem controlada pelo integrador:
+Para obter e renovar tokens sob demanda, use providers assíncronos que consultem apenas uma origem controlada pelo integrador. Depois de um `401`, o SDK chama `accessTokenRefreshProvider` e repete exatamente uma vez a operação que falhou:
 
 ```swift
 let client = AmazonCreatorsClient(
     accessTokenProvider: {
         try await tokenBroker.accessToken()
     },
+    accessTokenRefreshProvider: {
+        try await tokenBroker.refreshAccessToken()
+    },
     credentialVersion: .v3NorthAmerica,
     partnerTag: "seu-tag-20",
     marketplace: .brazil
 )
 ```
+
+Se `accessTokenRefreshProvider` for omitido, o SDK chama `accessTokenProvider` novamente após o `401`. Use o provider específico quando o seu broker diferenciar uma leitura de cache de uma renovação forçada. Clientes criados com `accessToken` estático não podem ser renovados automaticamente; nesse caso, chame `updateAccessToken(_:)` depois de obter um token novo no backend.
 
 ## Exemplo prático: pesquisa para uma tela de catálogo
 
@@ -272,7 +277,7 @@ O SDK rejeita antes da chamada valores que desperdiçariam cota: busca sem termo
 | Erro | Ação recomendada |
 |---|---|
 | `invalidRequest` | Corrija o input local; nenhuma chamada foi enviada. |
-| `unauthorized` | Renove o token no backend e chame `updateAccessToken(_:)`, ou deixe o provider buscar um token válido. |
+| `unauthorized` | Com providers, ocorre somente após a renovação e a repetição automáticas. Verifique o broker; com token estático, renove no backend e chame `updateAccessToken(_:)`. |
 | `accessDenied` | Verifique `partnerTag`, marketplace e permissões da credencial. |
 | `throttled` | Reduza a taxa no escopo da credencial; o SDK já respeita retries limitados. |
 | `server` ou `transport` | Mostre uma ação de tentar novamente para o usuário. |
@@ -286,8 +291,9 @@ do {
 } catch let error as AmazonCreatorsError {
     switch error {
     case .unauthorized:
-        let refreshedToken = try await tokenBroker.accessToken()
-        try await client.updateAccessToken(refreshedToken)
+        // Com token estático, obtenha outro token no backend e atualize o cliente.
+        // Com providers, a renovação e uma repetição já foram tentadas pelo SDK.
+        break
     case .invalidRequest:
         // Apresente o erro de input sem repetir a chamada.
         break

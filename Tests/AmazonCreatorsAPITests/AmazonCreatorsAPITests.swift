@@ -75,6 +75,61 @@ struct AmazonCreatorsAPIClientTests {
         #expect(authorizations == ["Bearer token-v3", "Bearer token-renovado"])
     }
 
+    @Test("Uma resposta 401 renova o token e repete a chamada uma única vez")
+    func unauthorizedResponseRefreshesTokenAndRetriesOnce() async throws {
+        let transport = MockTransport(responses: [
+            .status(401, "{\"code\": \"InvalidToken\", \"message\": \"Expired\"}"),
+            .json("{\"browseNodesResult\": {\"browseNodes\": []}}")
+        ])
+        let tokenProvider = TokenProviderSpy(tokens: ["token-expirado"])
+        let refreshProvider = TokenProviderSpy(tokens: ["token-renovado"])
+        let client = makeProviderClient(
+            transport: transport,
+            accessTokenProvider: {
+                try await tokenProvider.nextToken()
+            },
+            accessTokenRefreshProvider: {
+                try await refreshProvider.nextToken()
+            }
+        )
+
+        _ = try await client.getBrowseNodes(GetBrowseNodesRequest(ids: ["123"]))
+
+        let authorizations = await transport.requests().compactMap {
+            $0.value(forHTTPHeaderField: "Authorization")
+        }
+
+        #expect(authorizations == ["Bearer token-expirado", "Bearer token-renovado"])
+        #expect(await tokenProvider.invocationCount() == 1)
+        #expect(await refreshProvider.invocationCount() == 1)
+    }
+
+    @Test("O SDK não tenta renovar o token mais de uma vez por chamada")
+    func unauthorizedResponseRefreshesTokenOnlyOnce() async throws {
+        let transport = MockTransport(responses: [
+            .status(401, "{\"code\": \"InvalidToken\", \"message\": \"Expired\"}"),
+            .status(401, "{\"code\": \"InvalidToken\", \"message\": \"Still expired\"}")
+        ])
+        let tokenProvider = TokenProviderSpy(tokens: ["token-expirado"])
+        let refreshProvider = TokenProviderSpy(tokens: ["token-ainda-invalido"])
+        let client = makeProviderClient(
+            transport: transport,
+            accessTokenProvider: {
+                try await tokenProvider.nextToken()
+            },
+            accessTokenRefreshProvider: {
+                try await refreshProvider.nextToken()
+            }
+        )
+
+        await #expect(throws: AmazonCreatorsError.unauthorized(APIProblem(code: "InvalidToken", message: "Still expired"))) {
+            _ = try await client.getBrowseNodes(GetBrowseNodesRequest(ids: ["123"]))
+        }
+
+        #expect(await transport.requests().count == 2)
+        #expect(await refreshProvider.invocationCount() == 1)
+    }
+
     @Test("SearchItems, GetVariations e GetBrowseNodes usam as rotas de catálogo corretas")
     func catalogOperationsUseExpectedRoutes() async throws {
         let transport = MockTransport(responses: [
@@ -374,6 +429,46 @@ struct AmazonCreatorsAPIClientTests {
             configuration: configuration,
             transport: transport
         )
+    }
+
+    private func makeProviderClient(
+        transport: MockTransport,
+        accessTokenProvider: @escaping AccessTokenProvider,
+        accessTokenRefreshProvider: @escaping AccessTokenRefreshProvider
+    ) -> AmazonCreatorsClient {
+        AmazonCreatorsClient(
+            accessTokenProvider: accessTokenProvider,
+            accessTokenRefreshProvider: accessTokenRefreshProvider,
+            credentialVersion: .v3NorthAmerica,
+            partnerTag: "store-20",
+            marketplace: .brazil,
+            configuration: .testDefault,
+            transport: transport
+        )
+    }
+}
+
+private actor TokenProviderSpy {
+
+    private var tokens: [String]
+    private var count = 0
+
+    init(tokens: [String]) {
+        self.tokens = tokens
+    }
+
+    func nextToken() throws -> String {
+        guard !tokens.isEmpty else {
+            throw AmazonCreatorsError.unauthorized(APIProblem(message: "Nenhum token simulado foi configurado."))
+        }
+
+        count += 1
+
+        return tokens.removeFirst()
+    }
+
+    func invocationCount() -> Int {
+        count
     }
 }
 

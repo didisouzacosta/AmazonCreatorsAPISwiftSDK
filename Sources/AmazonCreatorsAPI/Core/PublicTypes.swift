@@ -88,6 +88,9 @@ public struct PartnerTag: Codable, Hashable, Sendable {
 /// Uma fonte assíncrona de access tokens temporários.
 public typealias AccessTokenProvider = @Sendable () async throws -> String
 
+/// Uma fonte assíncrona de um novo access token após uma falha de autenticação.
+public typealias AccessTokenRefreshProvider = @Sendable () async throws -> String
+
 /// As opções de cache de respostas do SDK.
 public enum CachePolicy: Sendable {
     /// Não armazena respostas da Creators API.
